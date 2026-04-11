@@ -1,0 +1,13 @@
+# Config for the dependency-review action (added to CI job below).
+# Fails CI if a PR introduces dependencies with known vulnerabilities
+# above moderate severity, or dependencies with denied licenses.
+fail-on-severity: moderate
+allow-licenses:
+  - MIT
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - Apache-2.0
+  - ISC
+  - Python-2.0
+  - Unlicense
+  - 0BSD
