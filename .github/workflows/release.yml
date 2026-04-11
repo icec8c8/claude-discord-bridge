@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for tag diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Releasing $TAG"
+          # Find the previous tag (exclude the one we're releasing)
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            echo "Previous tag: $PREV_TAG"
+            RANGE="${PREV_TAG}..${TAG}"
+            COMMITS=$(git log "$RANGE" --pretty=format:'- %s (%h)' --no-merges)
+            BODY="## Changes since \`${PREV_TAG}\`
+
+          ${COMMITS}
+
+          ---
+
+          _Built with Claude Code pair programming._
+          _Full changelog: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}_"
+          else
+            echo "No previous tag found — treating as initial release"
+            BODY="Initial release.
+
+          ---
+
+          _Built with Claude Code pair programming._"
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "$BODY" \
+            --latest \
+            --verify-tag

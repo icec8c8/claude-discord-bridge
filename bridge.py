@@ -34,9 +34,10 @@ import json
 import logging
 import os
 import pathlib
-import shlex
 import sys
+import time
 import uuid
+from collections import deque
 
 import discord
 from dotenv import load_dotenv
@@ -52,6 +53,11 @@ CLAUDE_EXE = os.environ.get("CLAUDE_EXE", "claude")  # relies on PATH; override 
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "300"))
 CLAUDE_CWD = os.environ.get("CLAUDE_CWD", str(BRIDGE_DIR))
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")  # cheaper than opus default
+
+# Rate limiting + daily cost cap — protect against runaway spend + compromised account DoS
+MAX_MESSAGES_PER_HOUR = int(os.environ.get("MAX_MESSAGES_PER_HOUR", "30"))
+MAX_DAILY_COST_USD = float(os.environ.get("MAX_DAILY_COST_USD", "5.00"))
+_msg_timestamps: deque = deque()
 
 # Whitelist of tools the headless claude is allowed to use. Read-only by default.
 # Add Bash / Edit / Write to give the Discord bot more power (and more risk).
@@ -98,6 +104,56 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 queue: asyncio.Queue = asyncio.Queue()
+
+
+def check_rate_limit() -> tuple[str, int, int]:
+    """Sliding-window rate limit. Returns (status, count, max_count).
+
+    status values:
+      - 'ok'    — under the limit, message accepted
+      - 'warn'  — at or above 80% of the cap, message accepted with ⚠️ reaction
+      - 'block' — at or above the cap, message rejected with 🛑 reaction
+
+    Prunes timestamps older than 1 hour on every call. On 'block', does NOT
+    record the current timestamp so retries don't keep filling the window.
+    """
+    now = time.time()
+    cutoff = now - 3600
+    while _msg_timestamps and _msg_timestamps[0] < cutoff:
+        _msg_timestamps.popleft()
+    count = len(_msg_timestamps)
+    if count >= MAX_MESSAGES_PER_HOUR:
+        return "block", count, MAX_MESSAGES_PER_HOUR
+    _msg_timestamps.append(now)
+    count += 1
+    if count >= max(1, int(MAX_MESSAGES_PER_HOUR * 0.8)):
+        return "warn", count, MAX_MESSAGES_PER_HOUR
+    return "ok", count, MAX_MESSAGES_PER_HOUR
+
+
+def get_daily_cost_usd() -> float:
+    """Sum total_cost_usd from outbox.jsonl for today's local date."""
+    if not OUTBOX.exists():
+        return 0.0
+    today = dt.date.today().isoformat()
+    total = 0.0
+    try:
+        with OUTBOX.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not row.get("ts", "").startswith(today):
+                    continue
+                usage = row.get("usage") or {}
+                total += usage.get("total_cost_usd", 0) or 0
+    except Exception as e:
+        log.warning("get_daily_cost_usd error: %s", e)
+    return total
 
 
 def chunk(text: str, n: int = 1900):
@@ -249,6 +305,8 @@ async def on_ready():
     log.info("model=%s prefix=%r", CLAUDE_MODEL, BRIDGE_PREFIX)
     log.info("allowed_tools=%s", " ".join(ALLOWED_TOOLS_LIST))
     log.info("filters: user=%s channel=%s", ALLOWED_USER_ID, ALLOWED_CHANNEL_ID)
+    log.info("rate_limit=%d msgs/hour, daily_cost_cap=$%.2f",
+             MAX_MESSAGES_PER_HOUR, MAX_DAILY_COST_USD)
     asyncio.create_task(worker())
 
 
@@ -260,6 +318,39 @@ async def on_message(message: discord.Message):
         return
     if message.channel.id != ALLOWED_CHANNEL_ID:
         return
+
+    # Daily cost cap — hard stop; protects against runaway spend / compromised account
+    cost_today = get_daily_cost_usd()
+    if cost_today >= MAX_DAILY_COST_USD:
+        log.warning("daily cost cap hit: $%.4f / $%.2f", cost_today, MAX_DAILY_COST_USD)
+        try:
+            await message.add_reaction("💰")
+            await message.reply(
+                f"⚠️ Daily cost cap reached: ${cost_today:.4f} / ${MAX_DAILY_COST_USD:.2f}. Resume tomorrow.",
+                mention_author=False,
+            )
+        except Exception:
+            pass
+        return
+
+    # Rate limit — sliding window, messages per hour
+    rl_status, rl_count, rl_max = check_rate_limit()
+    if rl_status == "block":
+        log.warning("rate limit hit: %d/%d per hour", rl_count, rl_max)
+        try:
+            await message.add_reaction("🛑")
+            await message.reply(
+                f"⚠️ Rate limit: {rl_count}/{rl_max} messages in the last hour. Slow down.",
+                mention_author=False,
+            )
+        except Exception:
+            pass
+        return
+    if rl_status == "warn":
+        try:
+            await message.add_reaction("⚠️")
+        except Exception:
+            pass
 
     # Prefix gate (security: defends against compromised Discord account & accidental sends)
     if BRIDGE_PREFIX:

@@ -1,5 +1,10 @@
 # Claude Discord Bridge
 
+[![CI](https://github.com/icec8c8/claude-discord-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/icec8c8/claude-discord-bridge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/icec8c8/claude-discord-bridge)](https://github.com/icec8c8/claude-discord-bridge/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 **[English](README.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)**
 
 A tiny daemon that lets you chat with a headless [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI from a private Discord channel, so you can drive your existing Claude subscription from anywhere your phone has Discord. No extra API key, no extra billing.
@@ -103,9 +108,9 @@ python -m venv venv
 
 # Install dependencies
 # Windows:
-venv\Scripts\python.exe -m pip install "discord.py>=2.4" "mcp[cli]" python-dotenv
+venv\Scripts\pip install -r requirements.txt
 # macOS/Linux:
-./venv/bin/pip install "discord.py>=2.4" "mcp[cli]" python-dotenv
+./venv/bin/pip install -r requirements.txt
 
 # Copy the environment template and fill in your secrets
 cp .env.example .env

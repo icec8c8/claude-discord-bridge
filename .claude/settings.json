@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/.env-*)",
+      "Read(**/id_rsa)",
+      "Read(**/id_rsa.*)",
+      "Read(**/id_ed25519)",
+      "Read(**/id_ed25519.*)",
+      "Read(**/id_ecdsa)",
+      "Read(**/id_dsa)",
+      "Read(**/.ssh/**)",
+      "Read(**/Library/Keychains/**)",
+      "Read(**/Keychains/**)",
+      "Read(**/Cookies)",
+      "Read(**/Cookies.*)",
+      "Read(**/.git-credentials)",
+      "Read(**/.netrc)",
+      "Read(**/.aws/**)",
+      "Read(**/.config/**/credentials*)",
+      "Read(**/.claude/**)",
+      "Read(**/.claude.json)",
+      "Read(**/.mempalace/**)",
+      "Read(**/.openclaw/**)",
+      "Read(**/bridge.pid)",
+      "Read(**/bridge_session_id.txt)",
+      "Read(**/wallet.dat)",
+      "Read(**/*.keystore)",
+      "Read(**/*.pfx)",
+      "Read(**/*.p12)",
+      "Grep(**/.env)",
+      "Grep(**/.env.*)",
+      "Grep(**/.ssh/**)",
+      "Grep(**/Keychains/**)",
+      "Grep(**/.aws/**)",
+      "Grep(**/.claude/**)",
+      "Grep(**/.mempalace/**)",
+      "Grep(**/.openclaw/**)"
+    ]
+  }
+}

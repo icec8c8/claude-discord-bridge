@@ -1,5 +1,10 @@
 # Claude Discord Bridge
 
+[![CI](https://github.com/icec8c8/claude-discord-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/icec8c8/claude-discord-bridge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/icec8c8/claude-discord-bridge)](https://github.com/icec8c8/claude-discord-bridge/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 **[English](README.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)**
 
 一個小小的常駐程式，讓你透過一個私人的 Discord 頻道與 [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI 對話。這樣不論你人在哪裡，只要手機上有 Discord，就能驅動你現有的 Claude 訂閱。**不需要額外的 API key，也不會產生額外費用**。
@@ -103,9 +108,9 @@ python -m venv venv
 
 # 裝相依套件
 # Windows:
-venv\Scripts\python.exe -m pip install "discord.py>=2.4" "mcp[cli]" python-dotenv
+venv\Scripts\pip install -r requirements.txt
 # macOS/Linux:
-./venv/bin/pip install "discord.py>=2.4" "mcp[cli]" python-dotenv
+./venv/bin/pip install -r requirements.txt
 
 # 複製環境變數範例檔並填入你的 secrets
 cp .env.example .env

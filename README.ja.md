@@ -1,5 +1,10 @@
 # Claude Discord Bridge
 
+[![CI](https://github.com/icec8c8/claude-discord-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/icec8c8/claude-discord-bridge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/icec8c8/claude-discord-bridge)](https://github.com/icec8c8/claude-discord-bridge/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+
 **[English](README.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)**
 
 プライベートな Discord チャンネル経由で、ヘッドレスの [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI と対話できる小さなデーモンです。これにより、スマートフォンの Discord さえあれば、どこからでも既存の Claude サブスクリプションを動かせます。**追加の API キーも追加料金も不要**です。
@@ -103,9 +108,9 @@ python -m venv venv
 
 # 依存関係をインストール
 # Windows:
-venv\Scripts\python.exe -m pip install "discord.py>=2.4" "mcp[cli]" python-dotenv
+venv\Scripts\pip install -r requirements.txt
 # macOS/Linux:
-./venv/bin/pip install "discord.py>=2.4" "mcp[cli]" python-dotenv
+./venv/bin/pip install -r requirements.txt
 
 # 環境変数テンプレートをコピーして秘密情報を入力
 cp .env.example .env
