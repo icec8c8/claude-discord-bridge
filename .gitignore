@@ -1,0 +1,32 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Bridge runtime state (regenerated each run)
+bridge.pid
+bridge.log
+launchd.out.log
+launchd.err.log
+inbox.jsonl
+outbox.jsonl
+bridge_session_id.txt
+bridge_session_seeded.flag
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent TEMPLATE for the Discord <-> Claude Code bridge.
+
+  This file contains placeholders. Do NOT copy it directly into
+  ~/Library/LaunchAgents/. Use install_aqua_launchagent.sh which reads
+  your environment, substitutes placeholders, and installs the result.
+
+  Why LimitLoadToSessionType=Aqua:
+    macOS login keychain is only unlocked in the GUI Aqua session. SSH /
+    daemon contexts cannot read claude CLI's stored credentials, so the
+    bridge MUST run in the Aqua session for `claude -p` to authenticate.
+
+  ⚠️ If you also run this bridge on another machine (Windows Task
+  Scheduler, Linux systemd...), only ONE instance can be connected to the
+  Discord bot Gateway at a time. Stop the other side before activating.
+
+  Placeholders the install script will substitute:
+    __HOME__         — /Users/<your-login>
+    __CLAUDE_BIN__   — absolute path to `claude` (e.g., from `which claude`)
+    __NODE_BIN_DIR__ — dirname of the node binary (for PATH, if using nvm)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.local.claude-discord-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.claude-bridge/venv/bin/python</string>
+        <string>__HOME__/.claude-bridge/bridge.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__/.claude-bridge</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__NODE_BIN_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>CLAUDE_EXE</key>
+        <string>__CLAUDE_BIN__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.claude-bridge/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.claude-bridge/launchd.err.log</string>
+
+    <!-- Critical: Aqua session only, so login keychain is unlocked -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
