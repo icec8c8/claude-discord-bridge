@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Minimum permissions — this workflow only reads the repo
+permissions:
+  contents: read
+
+jobs:
+  # Job 1: syntax + import smoke test across supported Python versions
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "discord.py>=2.4" "mcp[cli]>=1.0" python-dotenv
+
+      - name: Syntax check (py_compile)
+        run: |
+          python -m py_compile bridge.py bridge_mcp.py
+          echo "✓ syntax OK"
+
+      - name: Import smoke test
+        env:
+          # bridge.py reads these at module import time; CI needs dummy values
+          DISCORD_BOT_TOKEN: ci-dummy-not-a-real-token
+          ALLOWED_USER_ID: '0'
+          ALLOWED_CHANNEL_ID: '0'
+        run: |
+          python -c "
+          import bridge, bridge_mcp
+          print('bridge imported OK')
+          tools = list(bridge_mcp.app._tool_manager._tools.keys())
+          print('bridge_mcp imported OK, tools:', tools)
+          assert len(tools) == 6, f'expected 6 tools, got {len(tools)}'
+          expected = {'inbox_list', 'outbox_list', 'bridge_status', 'send_message', 'tail_log', 'usage_today'}
+          assert set(tools) == expected, f'tool mismatch: {set(tools) ^ expected}'
+          print('✓ all 6 MCP tools registered')
+          "
+
+  # Job 2: secret scan — run independently, fails the whole CI if anything matches
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Scan for Discord bot token patterns
+        run: |
+          # Strict Discord bot token: MT<base64>.<base64>.<base64>
+          hits=$(git ls-files | xargs grep -lnE "MT[A-Za-z0-9_-]{22,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,}" 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Possible Discord bot token detected in:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ no Discord bot tokens"
+
+      - name: Scan for Anthropic / OpenAI API keys
+        run: |
+          hits=$(git ls-files | xargs grep -lnE "sk-[A-Za-z0-9_-]{40,}" 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Possible API key detected in:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ no API keys"
+
+      - name: Scan for AWS access keys
+        run: |
+          hits=$(git ls-files | xargs grep -lnE "AKIA[0-9A-Z]{16}" 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Possible AWS access key detected in:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ no AWS keys"
+
+      - name: Scan for private keys
+        run: |
+          hits=$(git ls-files | xargs grep -lE "BEGIN (RSA|EC|DSA|OPENSSH|PGP) PRIVATE KEY" 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Private key material detected in:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ no private keys"
+
+      - name: Verify .env is not tracked
+        run: |
+          if git ls-files | grep -E "^\.env$"; then
+            echo "::error::.env is tracked! Remove it and add to .gitignore."
+            exit 1
+          fi
+          echo "✓ .env not tracked"
+
+      - name: Verify runtime state files are not tracked
+        run: |
+          forbidden='^(bridge\.pid|bridge\.log|inbox\.jsonl|outbox\.jsonl|bridge_session_id\.txt|bridge_session_seeded\.flag|launchd\.(out|err)\.log)$'
+          hits=$(git ls-files | grep -E "$forbidden" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Runtime state file tracked (should be in .gitignore):"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✓ runtime state properly ignored"
+
+  # Job 3: structural sanity — README languages present, LICENSE + SECURITY.md exist
+  docs:
+    name: Documentation structure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Verify required docs exist
+        run: |
+          for f in README.md README.zh-TW.md README.ja.md SECURITY.md LICENSE .env.example .gitignore; do
+            if [ ! -f "$f" ]; then
+              echo "::error::required file missing: $f"
+              exit 1
+            fi
+          done
+          echo "✓ all required docs present"
+
+      - name: Verify language selector links in READMEs
+        run: |
+          for f in README.md README.zh-TW.md README.ja.md; do
+            if ! grep -q 'README.md' "$f" || ! grep -q 'README.zh-TW.md' "$f" || ! grep -q 'README.ja.md' "$f"; then
+              echo "::error::$f is missing language selector links"
+              exit 1
+            fi
+          done
+          echo "✓ language selectors present in all 3 READMEs"
