@@ -1,5 +1,16 @@
 """
-Discord -> headless Claude Code auto-reply bridge (v2.4 stall-resistant).
+Discord -> headless Claude Code auto-reply bridge (v2.5 self-healing sessions).
+
+v2.5 (2026-04-15) changes over v2.4:
+- Session auto-recovery — if claude exits with "session already in use"
+  (because a prior --session-id spawn got killed before return, leaving the
+  CLI with a half-registered session), flip seeded=True and retry with
+  --resume. If claude says "session not found", rotate to a fresh uuid.
+  Heals the stuck-worker mode from 18:07 where w2 kept 4-sec-failing on
+  every Discord message.
+- Seed-on-spawn — session_ids.json now flips seeded=True the moment claude
+  is launched with --session-id, not after a clean return. A killed run no
+  longer leaves a seeded=False + CLI-side-registered mismatch.
 
 v2.4 (2026-04-15) changes over v2.3:
 - Process-group spawn (start_new_session=True) — claude's subprocesses (find,
@@ -307,99 +318,155 @@ async def _watch(message: discord.Message, worker_id: int, proc: asyncio.subproc
         return
 
 
+def _classify_session_error(err_text: str) -> str | None:
+    """Recognise claude CLI session errors we can auto-recover from.
+
+    Returns:
+      'in_use'     — session id already exists; switch to --resume
+      'not_found'  — session id was forgotten by CLI; rotate to a fresh uuid
+      None         — unrecognised, caller should bubble the error
+    """
+    t = (err_text or "").lower()
+    if "already in use" in t and "session" in t:
+        return "in_use"
+    if ("session" in t and ("not found" in t or "does not exist" in t or "unknown session" in t)):
+        return "not_found"
+    return None
+
+
 async def run_claude(prompt: str, worker_id: int,
                      message: discord.Message) -> tuple[bool, str, dict]:
+    """Run claude -p with session auto-recovery.
+
+    On the first attempt we spawn in whichever mode (resume/create) matches
+    the persisted seeded flag. If claude exits with a known session-id error
+    ('already in use' or 'not found'), we flip the seeded flag (or rotate the
+    uuid) and retry once. This self-heals the failure mode from 2026-04-15
+    16:09 where a killed --session-id run left the CLI with a half-registered
+    session that blocked every subsequent call until the bridge was restarted.
+    """
     session = SESSIONS[worker_id]
-    if session["seeded"]:
-        session_flag = ["--resume", session["uuid"]]
-        mode = "resume"
-    else:
-        session_flag = ["--session-id", session["uuid"]]
-        mode = "create"
-    args = [
-        CLAUDE_EXE,
-        "-p", prompt,
-        "--output-format", "json",
-        "--dangerously-skip-permissions",
-        "--model", CLAUDE_MODEL,
-        "--max-turns", str(CLAUDE_MAX_TURNS),
-        "--allowedTools", *ALLOWED_TOOLS_LIST,
-        *session_flag,
-    ]
-    log.info(
-        "w%d spawn claude (mode=%s, model=%s, max_turns=%d, tools=%d, session=%s..., len=%d)",
-        worker_id, mode, CLAUDE_MODEL, CLAUDE_MAX_TURNS, len(ALLOWED_TOOLS_LIST),
-        session["uuid"][:8], len(prompt),
-    )
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        cwd=CLAUDE_CWD,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-        start_new_session=True,
-    )
-    t0 = time.time()
-    stall_evt = asyncio.Event()
-    watch_task = asyncio.create_task(_watch(message, worker_id, proc, t0, stall_evt))
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
-    except asyncio.TimeoutError:
-        _kill_tree(proc, reason=f"timeout after {CLAUDE_TIMEOUT}s")
+    last_error_text = ""
+
+    for attempt in range(2):
+        if session["seeded"]:
+            session_flag = ["--resume", session["uuid"]]
+            mode = "resume"
+        else:
+            session_flag = ["--session-id", session["uuid"]]
+            mode = "create"
+        args = [
+            CLAUDE_EXE,
+            "-p", prompt,
+            "--output-format", "json",
+            "--dangerously-skip-permissions",
+            "--model", CLAUDE_MODEL,
+            "--max-turns", str(CLAUDE_MAX_TURNS),
+            "--allowedTools", *ALLOWED_TOOLS_LIST,
+            *session_flag,
+        ]
+        log.info(
+            "w%d spawn claude (attempt=%d mode=%s, model=%s, max_turns=%d, tools=%d, session=%s..., len=%d)",
+            worker_id, attempt, mode, CLAUDE_MODEL, CLAUDE_MAX_TURNS,
+            len(ALLOWED_TOOLS_LIST), session["uuid"][:8], len(prompt),
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=CLAUDE_CWD,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            start_new_session=True,
+        )
+        # Seed-on-spawn: as soon as claude is launched with --session-id,
+        # assume the CLI has registered the uuid. Persist immediately so a
+        # subsequent crash/kill of *this* bridge doesn't leave an orphaned
+        # session that blocks future restarts (root cause of 2026-04-15 16:09).
+        if mode == "create" and not session["seeded"]:
+            session["seeded"] = True
+            _save_sessions(SESSIONS)
+            log.info("w%d session seeded-on-spawn", worker_id)
+
+        t0 = time.time()
+        stall_evt = asyncio.Event()
+        watch_task = asyncio.create_task(_watch(message, worker_id, proc, t0, stall_evt))
+        timed_out = False
         try:
-            await proc.communicate()
-        except Exception:
-            pass
-        watch_task.cancel()
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(),
+                                                        timeout=CLAUDE_TIMEOUT)
+            except asyncio.TimeoutError:
+                _kill_tree(proc, reason=f"timeout after {CLAUDE_TIMEOUT}s")
+                try:
+                    stdout, stderr = await proc.communicate()
+                except Exception:
+                    stdout, stderr = b"", b""
+                timed_out = True
+        finally:
+            watch_task.cancel()
+            try:
+                await watch_task
+            except Exception:
+                pass
+
+        if timed_out:
+            return False, f"\u26a0\ufe0f worker-{worker_id} claude timed out after {CLAUDE_TIMEOUT}s (tree killed)", {}
+
+        if stall_evt.is_set():
+            return False, f"\U0001f6a8 worker-{worker_id} stalled \u2014 claude tree killed after cpu<{STALL_CPU_THRESHOLD}% for {STALL_WINDOW_MIN}min", {}
+
+        raw_out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        last_error_text = err
+
+        # Session-error auto-recovery (only on first attempt)
+        if proc.returncode != 0 and attempt == 0:
+            kind = _classify_session_error(err)
+            if kind == "in_use":
+                log.warning("w%d session %s already in use \u2192 flip to --resume and retry",
+                            worker_id, session["uuid"][:8])
+                session["seeded"] = True
+                _save_sessions(SESSIONS)
+                continue
+            if kind == "not_found":
+                old = session["uuid"]
+                session["uuid"] = str(uuid.uuid4())
+                session["seeded"] = False
+                _save_sessions(SESSIONS)
+                log.warning("w%d session %s not found \u2192 rotated to %s and retry",
+                            worker_id, old[:8], session["uuid"][:8])
+                continue
+
+        # Normal return path (success, non-recoverable error, or post-retry failure)
+        if proc.returncode != 0:
+            return False, f"\u26a0\ufe0f claude exit {proc.returncode}\n```\n{err[:1500]}\n```", {}
+
         try:
-            await watch_task
-        except Exception:
-            pass
-        return False, f"\u26a0\ufe0f worker-{worker_id} claude timed out after {CLAUDE_TIMEOUT}s (tree killed)", {}
-    finally:
-        watch_task.cancel()
-        try:
-            await watch_task
-        except Exception:
-            pass
+            data = json.loads(raw_out)
+        except json.JSONDecodeError as e:
+            log.warning("w%d json parse failed: %s; raw[:200]=%r", worker_id, e, raw_out[:200])
+            return True, raw_out or "(empty)", {}
 
-    if stall_evt.is_set():
-        return False, f"\U0001f6a8 worker-{worker_id} stalled \u2014 claude tree killed after cpu<{STALL_CPU_THRESHOLD}% for {STALL_WINDOW_MIN}min", {}
+        if data.get("is_error"):
+            return False, f"\u26a0\ufe0f claude reported is_error\n```\n{json.dumps(data, ensure_ascii=False)[:1200]}\n```", data.get("usage", {}) or {}
 
-    raw_out = stdout.decode("utf-8", errors="replace").strip()
-    err = stderr.decode("utf-8", errors="replace").strip()
+        result_text = data.get("result", "") or ""
+        usage = dict(data.get("usage", {}) or {})
+        usage["total_cost_usd"] = data.get("total_cost_usd", 0)
+        usage["model"] = next(iter(data.get("modelUsage", {})), CLAUDE_MODEL)
 
-    if proc.returncode != 0:
-        return False, f"\u26a0\ufe0f claude exit {proc.returncode}\n```\n{err[:1500]}\n```", {}
+        log.info(
+            "w%d claude ok (out=%d, cost=$%.4f, in=%d cache_r=%d cache_c=%d out_tok=%d)",
+            worker_id, len(result_text), usage.get("total_cost_usd", 0),
+            usage.get("input_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            usage.get("output_tokens", 0),
+        )
+        return True, result_text, usage
 
-    try:
-        data = json.loads(raw_out)
-    except json.JSONDecodeError as e:
-        log.warning("w%d json parse failed: %s; raw[:200]=%r", worker_id, e, raw_out[:200])
-        return True, raw_out or "(empty)", {}
-
-    if data.get("is_error"):
-        return False, f"\u26a0\ufe0f claude reported is_error\n```\n{json.dumps(data, ensure_ascii=False)[:1200]}\n```", data.get("usage", {}) or {}
-
-    result_text = data.get("result", "") or ""
-    usage = dict(data.get("usage", {}) or {})
-    usage["total_cost_usd"] = data.get("total_cost_usd", 0)
-    usage["model"] = next(iter(data.get("modelUsage", {})), CLAUDE_MODEL)
-
-    if not session["seeded"]:
-        session["seeded"] = True
-        _save_sessions(SESSIONS)
-        log.info("w%d session seeded; future calls will --resume", worker_id)
-
-    log.info(
-        "w%d claude ok (out=%d, cost=$%.4f, in=%d cache_r=%d cache_c=%d out_tok=%d)",
-        worker_id, len(result_text), usage.get("total_cost_usd", 0),
-        usage.get("input_tokens", 0),
-        usage.get("cache_read_input_tokens", 0),
-        usage.get("cache_creation_input_tokens", 0),
-        usage.get("output_tokens", 0),
-    )
-    return True, result_text, usage
+    # Fell through both attempts
+    return False, f"\u26a0\ufe0f worker-{worker_id} failed twice (session auto-recover exhausted)\n```\n{last_error_text[:1200]}\n```", {}
 
 
 async def worker(worker_id: int):
