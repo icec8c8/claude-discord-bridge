@@ -1,31 +1,26 @@
 """
-Discord -> headless Claude Code auto-reply bridge (v2.3 fan-out + progress).
+Discord -> headless Claude Code auto-reply bridge (v2.4 stall-resistant).
 
-v2.3 (2026-04-15) changes over v2.2:
-- Fan-out N parallel workers (BRIDGE_WORKERS, default 3) — each holds its own
-  persistent --resume session (session_ids.json). Discord messages are dispatched
-  round-robin; a long task on worker-0 no longer blocks worker-1/2.
-- Progress heartbeat: every PROGRESS_INTERVAL seconds (default 60s) a worker
-  that's still running claude posts a short reply with elapsed time, so Discord
-  never looks "timed out" on long tasks.
-- CLAUDE_TIMEOUT default raised to 3600s (1 hour). Long-running tasks are OK as
-  long as claude actually makes progress; typing indicator + heartbeat keep the
-  Discord UX alive.
-- SIGHUP-style: edit session_ids.json or .env and `launchctl kickstart -k`
-  gui/$(id -u)/dev.local.claude-discord-bridge to reload.
+v2.4 (2026-04-15) changes over v2.3:
+- Process-group spawn (start_new_session=True) — claude's subprocesses (find,
+  grep, child bashes) now live in the same pgid. On timeout/stall we killpg()
+  the whole tree instead of just the parent, fixing the "orphaned find loops"
+  root cause of the 47-minute apparent stall on 2026-04-15 16:09.
+- CPU stall detection via psutil — each heartbeat samples total CPU time across
+  claude + all descendants. If the % CPU over STALL_WINDOW_MIN consecutive
+  minutes stays below STALL_CPU_THRESHOLD, the run is declared stalled and
+  killed with a 🚨 Discord reply. A living-but-idle run is now a detectable
+  failure, not a silent timer drain.
+- Heartbeats now include cpu% + child count so 總裁 can see work vs. no-work:
+  "⏳ worker-2 3m01s elapsed, cpu=38% procs=4"
+- --max-turns cap (CLAUDE_MAX_TURNS, default 30) — prevents infinite tool loops
+  where claude keeps spawning find after find on missing paths.
 
-Pipeline per Discord message:
-  1. discord.py Gateway receives, filters by user_id + channel_id
-  2. Prefix gate (BRIDGE_PREFIX), else 👀 + drop
-  3. Strip prefix, append to inbox.jsonl, react 📥
-  4. Enqueue — first free worker (react 🤖1..N) picks it up
-  5. Worker runs `claude -p ... --resume <worker-uuid>` with --output-format json
-  6. Progress heartbeat posts elapsed time every PROGRESS_INTERVAL seconds
-  7. Chunk result <=1900 chars, post each as Discord reply
-  8. React ✅/❌, append outcome (incl. usage + worker_id) to outbox.jsonl
-
-Headless claudes are SEPARATE conversations from 總裁's interactive session.
-Same Max sub, N+1 universes.
+v2.3 features retained:
+- BRIDGE_WORKERS fan-out with per-worker persistent --resume sessions
+- PROGRESS_INTERVAL heartbeat (now smarter — carries CPU info)
+- CLAUDE_TIMEOUT hard cap (default 3600s)
+- Per-worker emoji reaction + ⏸ pause reaction when all workers busy
 """
 
 from __future__ import annotations
@@ -36,12 +31,14 @@ import json
 import logging
 import os
 import pathlib
+import signal
 import sys
 import time
 import uuid
 from collections import deque
 
 import discord
+import psutil
 from dotenv import load_dotenv
 
 BRIDGE_DIR = pathlib.Path(__file__).resolve().parent
@@ -55,9 +52,15 @@ CLAUDE_EXE = os.environ.get("CLAUDE_EXE", "claude")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "3600"))
 CLAUDE_CWD = os.environ.get("CLAUDE_CWD", str(BRIDGE_DIR))
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "sonnet")
+CLAUDE_MAX_TURNS = int(os.environ.get("CLAUDE_MAX_TURNS", "30"))
 
 BRIDGE_WORKERS = max(1, int(os.environ.get("BRIDGE_WORKERS", "3")))
 PROGRESS_INTERVAL = max(15, int(os.environ.get("PROGRESS_INTERVAL", "60")))
+
+# Stall detection — if total CPU% across claude tree stays below this threshold
+# for STALL_WINDOW_MIN consecutive heartbeats, the run is declared stalled.
+STALL_CPU_THRESHOLD = float(os.environ.get("STALL_CPU_THRESHOLD", "2.0"))
+STALL_WINDOW_MIN = max(2, int(os.environ.get("STALL_WINDOW_MIN", "5")))
 
 MAX_MESSAGES_PER_HOUR = int(os.environ.get("MAX_MESSAGES_PER_HOUR", "60"))
 MAX_DAILY_COST_USD = float(os.environ.get("MAX_DAILY_COST_USD", "10.00"))
@@ -75,13 +78,11 @@ LOG_FILE = BRIDGE_DIR / "bridge.log"
 PID_FILE = BRIDGE_DIR / "bridge.pid"
 SESSIONS_FILE = BRIDGE_DIR / "session_ids.json"
 
-# Legacy v2.2 single-session files — migrated into session_ids.json on first boot
 LEGACY_SESSION_ID_FILE = BRIDGE_DIR / "bridge_session_id.txt"
 LEGACY_SESSION_SEEDED = BRIDGE_DIR / "bridge_session_seeded.flag"
 
 
 def _load_sessions() -> list[dict]:
-    """Load or create N worker sessions. Returns list of {uuid, seeded} dicts."""
     if SESSIONS_FILE.exists():
         try:
             data = json.loads(SESSIONS_FILE.read_text())
@@ -91,7 +92,6 @@ def _load_sessions() -> list[dict]:
     else:
         workers = []
 
-    # Migrate v2.2 single session into worker 0
     if not workers and LEGACY_SESSION_ID_FILE.exists():
         workers.append({
             "uuid": LEGACY_SESSION_ID_FILE.read_text().strip() or str(uuid.uuid4()),
@@ -191,31 +191,124 @@ def chunk(text: str, n: int = 1900):
         text = text[cut:].lstrip("\n")
 
 
-async def _heartbeat(message: discord.Message, worker_id: int, t0: float,
-                     cancel_evt: asyncio.Event) -> None:
-    """Every PROGRESS_INTERVAL s, post a short 'still working' reply."""
+def _sample_tree(pid: int) -> tuple[float, int]:
+    """Return (total_cpu_seconds, running_proc_count) across claude + descendants."""
     try:
-        while not cancel_evt.is_set():
+        p = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return 0.0, 0
+    procs = [p]
+    try:
+        procs.extend(p.children(recursive=True))
+    except psutil.NoSuchProcess:
+        pass
+    total = 0.0
+    running = 0
+    for proc in procs:
+        try:
+            t = proc.cpu_times()
+            total += t.user + t.system
+            if proc.is_running():
+                running += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return total, running
+
+
+def _kill_tree(proc: asyncio.subprocess.Process, reason: str) -> None:
+    """Kill claude + all descendants (they share a pgid thanks to start_new_session)."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+    log.warning("kill_tree pid=%s pgid=%s reason=%s", proc.pid, pgid, reason)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if pgid is not None:
             try:
-                await asyncio.wait_for(cancel_evt.wait(), timeout=PROGRESS_INTERVAL)
-                return  # cancelled cleanly
-            except asyncio.TimeoutError:
-                pass
-            elapsed = int(time.time() - t0)
-            mins, secs = divmod(elapsed, 60)
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                break
+            except OSError as e:
+                log.warning("killpg %s: %s", sig, e)
+        else:
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                break
+        time.sleep(0.5)
+        if proc.returncode is not None:
+            return
+
+
+async def _watch(message: discord.Message, worker_id: int, proc: asyncio.subprocess.Process,
+                 t0: float, stall_evt: asyncio.Event) -> None:
+    """Heartbeat + stall detection. Runs until proc exits or stall declared."""
+    last_total = 0.0
+    last_wall = t0
+    below_streak = 0
+    primed = False
+    try:
+        while proc.returncode is None:
+            try:
+                await asyncio.sleep(PROGRESS_INTERVAL)
+            except asyncio.CancelledError:
+                return
+            if proc.returncode is not None:
+                return
+            now = time.time()
+            total, n_procs = _sample_tree(proc.pid)
+            if not primed:
+                last_total, last_wall = total, now
+                primed = True
+                elapsed = int(now - t0)
+                m, s = divmod(elapsed, 60)
+                try:
+                    await message.channel.send(
+                        f"\u23f3 worker-{worker_id} {m}m{s:02d}s elapsed, sampling cpu\u2026",
+                        reference=message, mention_author=False,
+                    )
+                except Exception as e:
+                    log.warning("heartbeat send failed: %s", e)
+                continue
+            dt_wall = max(0.001, now - last_wall)
+            dt_cpu = max(0.0, total - last_total)
+            cpu_pct = (dt_cpu / dt_wall) * 100.0
+            last_total, last_wall = total, now
+            elapsed = int(now - t0)
+            m, s = divmod(elapsed, 60)
+            if cpu_pct < STALL_CPU_THRESHOLD:
+                below_streak += 1
+            else:
+                below_streak = 0
+            stalled = below_streak >= STALL_WINDOW_MIN
+            tag = "\U0001f6a8 STALL" if stalled else ("\u26a0\ufe0f low-cpu" if below_streak else "\u23f3")
             try:
                 await message.channel.send(
-                    f"\u23f3 worker-{worker_id} still working \u2014 {mins}m{secs:02d}s elapsed",
+                    f"{tag} worker-{worker_id} {m}m{s:02d}s elapsed, cpu={cpu_pct:.1f}% procs={n_procs}"
+                    + (f" (idle {below_streak}/{STALL_WINDOW_MIN})" if below_streak and not stalled else ""),
                     reference=message, mention_author=False,
                 )
             except Exception as e:
                 log.warning("heartbeat send failed: %s", e)
+            if stalled:
+                log.warning("w%d STALL detected (cpu<%.1f%% for %d/%d samples) \u2192 killing tree",
+                            worker_id, STALL_CPU_THRESHOLD, below_streak, STALL_WINDOW_MIN)
+                stall_evt.set()
+                _kill_tree(proc, reason=f"stall cpu<{STALL_CPU_THRESHOLD}% for {STALL_WINDOW_MIN}min")
+                try:
+                    await message.channel.send(
+                        f"\U0001f6a8 worker-{worker_id} stalled (cpu<{STALL_CPU_THRESHOLD}% for {STALL_WINDOW_MIN}min) \u2014 killed to free the slot",
+                        reference=message, mention_author=False,
+                    )
+                except Exception:
+                    pass
+                return
     except asyncio.CancelledError:
         return
 
 
-async def run_claude(prompt: str, worker_id: int) -> tuple[bool, str, dict]:
-    """Run claude -p headlessly on the given worker's persistent session."""
+async def run_claude(prompt: str, worker_id: int,
+                     message: discord.Message) -> tuple[bool, str, dict]:
     session = SESSIONS[worker_id]
     if session["seeded"]:
         session_flag = ["--resume", session["uuid"]]
@@ -229,12 +322,13 @@ async def run_claude(prompt: str, worker_id: int) -> tuple[bool, str, dict]:
         "--output-format", "json",
         "--dangerously-skip-permissions",
         "--model", CLAUDE_MODEL,
+        "--max-turns", str(CLAUDE_MAX_TURNS),
         "--allowedTools", *ALLOWED_TOOLS_LIST,
         *session_flag,
     ]
     log.info(
-        "w%d spawn claude (mode=%s, model=%s, tools=%d, session=%s..., len=%d)",
-        worker_id, mode, CLAUDE_MODEL, len(ALLOWED_TOOLS_LIST),
+        "w%d spawn claude (mode=%s, model=%s, max_turns=%d, tools=%d, session=%s..., len=%d)",
+        worker_id, mode, CLAUDE_MODEL, CLAUDE_MAX_TURNS, len(ALLOWED_TOOLS_LIST),
         session["uuid"][:8], len(prompt),
     )
     proc = await asyncio.create_subprocess_exec(
@@ -243,13 +337,34 @@ async def run_claude(prompt: str, worker_id: int) -> tuple[bool, str, dict]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        start_new_session=True,
     )
+    t0 = time.time()
+    stall_evt = asyncio.Event()
+    watch_task = asyncio.create_task(_watch(message, worker_id, proc, t0, stall_evt))
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return False, f"\u26a0\ufe0f worker-{worker_id} claude timed out after {CLAUDE_TIMEOUT}s", {}
+        _kill_tree(proc, reason=f"timeout after {CLAUDE_TIMEOUT}s")
+        try:
+            await proc.communicate()
+        except Exception:
+            pass
+        watch_task.cancel()
+        try:
+            await watch_task
+        except Exception:
+            pass
+        return False, f"\u26a0\ufe0f worker-{worker_id} claude timed out after {CLAUDE_TIMEOUT}s (tree killed)", {}
+    finally:
+        watch_task.cancel()
+        try:
+            await watch_task
+        except Exception:
+            pass
+
+    if stall_evt.is_set():
+        return False, f"\U0001f6a8 worker-{worker_id} stalled \u2014 claude tree killed after cpu<{STALL_CPU_THRESHOLD}% for {STALL_WINDOW_MIN}min", {}
 
     raw_out = stdout.decode("utf-8", errors="replace").strip()
     err = stderr.decode("utf-8", errors="replace").strip()
@@ -296,20 +411,13 @@ async def worker(worker_id: int):
         message, cleaned = item
         _worker_busy[worker_id] = True
         t0 = time.time()
-        cancel_evt = asyncio.Event()
-        hb_task = asyncio.create_task(_heartbeat(message, worker_id, t0, cancel_evt))
         try:
             try:
                 await message.add_reaction(emoji_tag)
             except Exception:
                 pass
             async with message.channel.typing():
-                ok, response, usage = await run_claude(cleaned, worker_id)
-            cancel_evt.set()
-            try:
-                await hb_task
-            except Exception:
-                pass
+                ok, response, usage = await run_claude(cleaned, worker_id, message)
             try:
                 await message.remove_reaction(emoji_tag, client.user)
             except Exception:
@@ -338,7 +446,6 @@ async def worker(worker_id: int):
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             log.info("w%d done in %.1fs (ok=%s)", worker_id, elapsed, ok)
         except Exception as e:
-            cancel_evt.set()
             log.exception("w%d exception: %s", worker_id, e)
             try:
                 await message.add_reaction("\u274c")
@@ -353,7 +460,9 @@ async def worker(worker_id: int):
 @client.event
 async def on_ready():
     log.info("connected as %s (id=%s)", client.user, client.user.id)
-    log.info("workers=%d timeout=%ds progress=%ds", BRIDGE_WORKERS, CLAUDE_TIMEOUT, PROGRESS_INTERVAL)
+    log.info("workers=%d timeout=%ds progress=%ds stall=cpu<%.1f%%/%dmin max_turns=%d",
+             BRIDGE_WORKERS, CLAUDE_TIMEOUT, PROGRESS_INTERVAL,
+             STALL_CPU_THRESHOLD, STALL_WINDOW_MIN, CLAUDE_MAX_TURNS)
     for i, s in enumerate(SESSIONS):
         log.info("  w%d session=%s seeded=%s", i, s["uuid"], s["seeded"])
     log.info("claude_exe=%s cwd=%s", CLAUDE_EXE, CLAUDE_CWD)
