@@ -20,6 +20,8 @@ inbox.jsonl
 outbox.jsonl
 bridge_session_id.txt
 bridge_session_seeded.flag
+session_ids.json
+*.bak_*
 
 # Editors
 .vscode/
