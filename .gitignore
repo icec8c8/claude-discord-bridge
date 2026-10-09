@@ -23,6 +23,12 @@ bridge_session_seeded.flag
 session_ids.json
 *.bak_*
 
+# Remote Control runtime state
+remote-control.log
+remote-control.log.1
+remote-control.launchd.log
+remote-control.pid
+
 # Editors
 .vscode/
 .idea/

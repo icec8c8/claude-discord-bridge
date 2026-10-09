@@ -23,12 +23,13 @@ claude> read the project README and tell me what to work on next
 2. [Features](#features)
 3. [Requirements](#requirements)
 4. [Setup](#setup) — Discord bot · Install · Windows auto-start · macOS auto-start
-5. [Configuration](#configuration) — full list of environment variables
-6. [Security model](#security-model) — **READ THIS BEFORE WIDENING THE TOOL WHITELIST**
-7. [Validation checklist](#validation-checklist) — how to verify safety before use
-8. [MCP server](#mcp-server)
-9. [Troubleshooting](#troubleshooting) — the five dead-ends we hit while building this
-10. [License](#license)
+5. [Remote Control](#remote-control) — drive this computer from the Claude app
+6. [Configuration](#configuration) — full list of environment variables
+7. [Security model](#security-model) — **READ THIS BEFORE WIDENING THE TOOL WHITELIST**
+8. [Validation checklist](#validation-checklist) — how to verify safety before use
+9. [MCP server](#mcp-server)
+10. [Troubleshooting](#troubleshooting) — the five dead-ends we hit while building this
+11. [License](#license)
 
 ## Architecture
 
@@ -66,6 +67,7 @@ The headless `claude -p` subprocess is a **completely separate conversation** fr
 - **Token accounting** — every call captures `usage` and `total_cost_usd` from `--output-format json`. Daily totals are exposed via the bundled MCP server.
 - **MCP server** — a sibling `bridge_mcp.py` exposes six tools (`inbox_list`, `outbox_list`, `bridge_status`, `send_message`, `tail_log`, `usage_today`) so another Claude Code session can inspect and control the bridge.
 - **Auto-start** — Windows Scheduled Task at logon, or macOS LaunchAgent in the Aqua session.
+- **Remote Control, always on** — optional installers keep `claude remote-control` running at logon, so the Claude mobile app can start full Claude Code sessions on this computer. See [Remote Control](#remote-control).
 - **Single-user by design** — filters by one Discord user ID and one channel ID. Everything else is hard-dropped.
 
 ## Requirements
@@ -169,6 +171,77 @@ bash install_aqua_launchagent.sh
 The script reads your `$HOME`, locates `claude` via `which claude`, substitutes placeholders in `claude-discord-bridge.plist.template`, writes the result to `~/Library/LaunchAgents/dev.local.claude-discord-bridge.plist`, validates it with `plutil -lint`, and bootstraps it into `gui/$(id -u)`.
 
 Before running the macOS installer, **stop the Windows scheduled task** (`Stop-ScheduledTask` + `Disable-ScheduledTask`) if you are running on Windows too. A Discord bot token can only have one Gateway connection at a time; two bridges with the same token will fight and cycle each other.
+
+## Remote Control
+
+The Discord bridge is good for "send one message, get one answer". To open a full Claude Code session on this computer from the **Claude mobile app** (edit files, run commands, approve each step from your phone), use Claude Code's built-in [Remote Control](https://code.claude.com/docs/en/remote-control). This repo ships installers that keep it running from logon.
+
+| | Discord bridge | Remote Control |
+|---|---|---|
+| Driven from | Discord | Claude app **Code** tab, or claude.ai/code |
+| Tools | read-only whitelist by default | full Claude Code; anything needing permission asks you on the phone |
+| Conversations | one fixed session | start as many sessions as you like |
+
+Both can run at the same time and share your subscription's usage limits.
+
+**Requirements:** a Pro, Max, Team or Enterprise plan, signed in with your claude.ai account (`claude auth login`). API keys are not supported. On Team/Enterprise an Owner must first turn Remote Control on in the claude.ai admin settings.
+
+### Step 1: One-time setup (in a normal terminal)
+
+The first start asks two questions that a background service can't answer, so run it once by hand:
+
+```bash
+# Windows (PowerShell)
+mkdir $HOME\claude-remote; cd $HOME\claude-remote
+claude remote-control
+
+# macOS
+mkdir -p ~/claude-remote && cd ~/claude-remote
+claude remote-control
+```
+
+Answer `y` to `Enable Remote Control? (y/n)` and to `Trust <folder>?`. Once the session URL shows, you can check that this computer appears under **Code** in the Claude app, then press `Ctrl+C`.
+
+`claude-remote` is the folder sessions start in. Any project folder works, but **not your home directory itself**: Claude Code never saves trust for it, so the background service could not start there.
+
+### Step 2a: Windows auto-start
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1
+# Custom folder / name / permission mode:
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1 -WorkDir D:\projects -Name "Home PC" -ExtraArgs "--permission-mode acceptEdits"
+```
+
+This creates a Scheduled Task called `ClaudeRemoteControl`. At logon it runs `remote_control_loop.ps1` in a hidden window. The loop runs `claude remote-control` and restarts it whenever it exits (for example after ~10 minutes without network). Output goes to `remote-control.log`. The installer waits 20 seconds and prints the last lines of the log.
+
+To remove it (this also stops the server):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1 -Uninstall
+```
+
+### Step 2b: macOS auto-start (Aqua session)
+
+As with the bridge, **run this from a GUI Terminal.app window, not SSH**:
+
+```bash
+bash install_remote_control_launchagent.sh
+# or: bash install_remote_control_launchagent.sh --workdir ~/projects --name "Mac mini"
+```
+
+This installs `~/Library/LaunchAgents/dev.local.claude-remote-control.plist`, and `remote_control_loop.sh` restarts the server as needed. Sessions get the `$PATH` of the terminal you installed from. Remove it with `bash install_remote_control_launchagent.sh --uninstall`.
+
+### Using it
+
+Open the Claude app and tap **Code**. This computer is the entry with a computer icon and a green dot. Open a session, or start a new one, and type what you want done.
+
+### Notes
+
+- The computer must stay on and awake. A sleeping laptop goes offline and comes back on its own after it wakes.
+- Bypass permissions can't be chosen from the app. Approve actions on your phone, or pass `--permission-mode acceptEdits` through `-ExtraArgs` / `--extra-args` to auto-accept file edits.
+- Transcripts pass through Anthropic's servers; all execution stays on your computer.
+- Don't run another `claude remote-control` by hand in the same folder while the service is running.
+- If the computer never shows up, read `remote-control.log`. `Workspace not trusted` or a stuck `Enable Remote Control? (y/n)` means Step 1 wasn't done in that folder. A login error means run `claude auth login`; on macOS, also check that you installed from the Aqua session.
 
 ## Configuration
 

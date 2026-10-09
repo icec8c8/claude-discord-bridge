@@ -117,7 +117,7 @@ jobs:
 
       - name: Verify runtime state files are not tracked
         run: |
-          forbidden='^(bridge\.pid|bridge\.log|inbox\.jsonl|outbox\.jsonl|bridge_session_id\.txt|bridge_session_seeded\.flag|launchd\.(out|err)\.log)$'
+          forbidden='^(bridge\.pid|bridge\.log|inbox\.jsonl|outbox\.jsonl|bridge_session_id\.txt|bridge_session_seeded\.flag|launchd\.(out|err)\.log|remote-control\.(log|log\.1|launchd\.log|pid))$'
           hits=$(git ls-files | grep -E "$forbidden" || true)
           if [ -n "$hits" ]; then
             echo "::error::Runtime state file tracked (should be in .gitignore):"

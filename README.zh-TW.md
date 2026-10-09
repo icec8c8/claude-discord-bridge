@@ -23,12 +23,13 @@ claude> 幫我讀一下專案 README，告訴我接下來該做什麼
 2. [功能特色](#功能特色)
 3. [系統需求](#系統需求)
 4. [安裝步驟](#安裝步驟) — Discord bot · 安裝 · Windows 開機自啟 · macOS 開機自啟
-5. [設定](#設定) — 完整環境變數列表
-6. [安全模型](#安全模型) — **在放寬工具白名單之前請務必讀完**
-7. [驗證清單](#驗證清單) — 使用前如何驗證安全性
-8. [MCP server](#mcp-server)
-9. [疑難排解](#疑難排解) — 開發時踩過的 5 個坑
-10. [授權條款](#授權條款)
+5. [Remote Control](#remote-control) — 用 Claude App 操作這台電腦
+6. [設定](#設定) — 完整環境變數列表
+7. [安全模型](#安全模型) — **在放寬工具白名單之前請務必讀完**
+8. [驗證清單](#驗證清單) — 使用前如何驗證安全性
+9. [MCP server](#mcp-server)
+10. [疑難排解](#疑難排解) — 開發時踩過的 5 個坑
+11. [授權條款](#授權條款)
 
 ## 架構
 
@@ -66,6 +67,7 @@ headless `claude -p` 子行程是**跟你正在開啟的任何 Claude Code TUI s
 - **Token 用量追蹤** — 每次呼叫都用 `--output-format json` 取回 `usage` 和 `total_cost_usd`，寫進 `outbox.jsonl`。每日總計可以透過內建 MCP tool 查詢。
 - **MCP server** — 附帶的 `bridge_mcp.py` 暴露 6 個 tools（`inbox_list`、`outbox_list`、`bridge_status`、`send_message`、`tail_log`、`usage_today`），讓同一台機器上的另一個 Claude Code session 能夠檢查與控制 bridge。
 - **開機自啟** — Windows 走 Scheduled Task；macOS 走 LaunchAgent 綁 Aqua session。
+- **Remote Control 常駐** — 另附安裝腳本，登入時就讓 `claude remote-control` 常駐，手機 Claude App 隨時能在這台電腦開完整的 Claude Code session。見 [Remote Control](#remote-control)。
 - **設計上就是單使用者** — 硬綁定一個 Discord user ID 和一個 channel ID，其餘一律 drop。
 
 ## 系統需求
@@ -169,6 +171,77 @@ bash install_aqua_launchagent.sh
 腳本會讀取你的 `$HOME`、用 `which claude` 找到 claude 可執行檔、把 `claude-discord-bridge.plist.template` 裡的 placeholder 做字串替換、輸出到 `~/Library/LaunchAgents/dev.local.claude-discord-bridge.plist`、用 `plutil -lint` 驗證、再透過 `launchctl bootstrap gui/$(id -u)` 載入。
 
 執行 macOS 這邊的 installer **之前**，若你同時也跑 Windows 版，**請先 Stop + Disable Windows 那邊的 Scheduled Task**。一個 Discord bot token 同一時間只能有一個 Gateway 連線，兩邊同時跑會互踢。
+
+## Remote Control
+
+Discord bridge 適合「傳一句話、拿一個答案」。如果想用手機上的 **Claude App** 在這台電腦開一個完整的 Claude Code session（改檔、跑指令，每一步都能在手機上核准），請用 Claude Code 內建的 [Remote Control](https://code.claude.com/docs/en/remote-control)。這個 repo 附了讓它登入後自動常駐的安裝腳本。
+
+| | Discord bridge | Remote Control |
+|---|---|---|
+| 從哪裡操作 | Discord | Claude App 的 **Code** 分頁，或 claude.ai/code |
+| 工具 | 預設唯讀白名單 | 完整的 Claude Code，需要權限的動作會在手機上問你 |
+| 對話 | 單一固定 session | 想開幾個 session 都可以 |
+
+兩者可以同時跑，共用同一個訂閱的用量額度。
+
+**需求：** Pro、Max、Team 或 Enterprise 方案，並用 claude.ai 帳號登入（`claude auth login`）。不支援 API key。Team / Enterprise 要先請 Owner 在 claude.ai 管理設定裡開啟 Remote Control。
+
+### 步驟 1：一次性首次設定（在一般終端機手動做）
+
+第一次啟動會問兩個問題，背景服務沒辦法代答，所以要先手動跑一次：
+
+```bash
+# Windows (PowerShell)
+mkdir $HOME\claude-remote; cd $HOME\claude-remote
+claude remote-control
+
+# macOS
+mkdir -p ~/claude-remote && cd ~/claude-remote
+claude remote-control
+```
+
+`Enable Remote Control? (y/n)` 回 `y`，`Trust <資料夾>?` 也回 `y`。看到 session 網址後，可以先打開手機 Claude App 的 **Code** 分頁，確認看得到這台電腦，然後按 `Ctrl+C` 結束。
+
+`claude-remote` 是 session 的起始資料夾，換成任何專案資料夾都可以，但**不能是家目錄本身**：Claude Code 不會記住家目錄的信任設定，背景服務在那裡會啟動失敗。
+
+### 步驟 2a：Windows 開機自啟
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1
+# 自訂資料夾 / 名稱 / 權限模式：
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1 -WorkDir D:\projects -Name "Home PC" -ExtraArgs "--permission-mode acceptEdits"
+```
+
+這會建立名為 `ClaudeRemoteControl` 的 Scheduled Task。登入時以隱藏視窗執行 `remote_control_loop.ps1`，由它執行 `claude remote-control`，程式結束時（例如斷網約 10 分鐘後）會自動重啟。輸出寫在 `remote-control.log`。安裝完會等 20 秒，並印出 log 的最後幾行。
+
+移除（同時停止伺服器）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1 -Uninstall
+```
+
+### 步驟 2b：macOS 開機自啟（Aqua session）
+
+跟 bridge 一樣，**要在 GUI Terminal.app 視窗執行，不能用 SSH**：
+
+```bash
+bash install_remote_control_launchagent.sh
+# 或：bash install_remote_control_launchagent.sh --workdir ~/projects --name "Mac mini"
+```
+
+這會安裝 `~/Library/LaunchAgents/dev.local.claude-remote-control.plist`，由 `remote_control_loop.sh` 負責在需要時重啟。session 會沿用你執行安裝時那個終端機的 `$PATH`。移除：`bash install_remote_control_launchagent.sh --uninstall`。
+
+### 使用方式
+
+打開 Claude App，點 **Code** 分頁，有電腦圖示加綠點的就是這台電腦。點進現有的 session 或開新的 session，直接打你要做的事。
+
+### 注意事項
+
+- 電腦要保持開機、不能睡眠。筆電睡眠時會離線，醒來後會自動恢復。
+- App 裡不能選 bypass permissions。需要權限的動作在手機上核准；想自動接受改檔，可以用 `-ExtraArgs` / `--extra-args` 帶 `--permission-mode acceptEdits`。
+- 對話紀錄會經過 Anthropic 的伺服器，實際執行都在你的電腦上。
+- 服務在跑的時候，不要在同一個資料夾另外手動跑 `claude remote-control`。
+- 手機上一直看不到這台電腦時，看 `remote-control.log`：出現 `Workspace not trusted` 或卡在 `Enable Remote Control? (y/n)`，代表那個資料夾還沒做步驟 1；出現登入錯誤就執行 `claude auth login`，macOS 還要確認是在 Aqua session 安裝的。
 
 ## 設定
 

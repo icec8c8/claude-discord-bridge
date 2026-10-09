@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent TEMPLATE that keeps `claude remote-control` running, so
+  the Claude mobile app / claude.ai/code can start sessions on this Mac.
+
+  Do NOT copy it directly into ~/Library/LaunchAgents/. Use
+  install_remote_control_launchagent.sh, which fills in every __PLACEHOLDER__
+  value with `plutil -replace` (so paths with spaces or & need no escaping)
+  and installs the result.
+
+  Why LimitLoadToSessionType=Aqua: same as claude-discord-bridge.plist.template
+  — Claude Code's login lives in the login keychain, which is only unlocked
+  in the GUI Aqua session.
+
+  Placeholders:
+    __BRIDGE_DIR__     — folder holding remote_control_loop.sh
+    __PATH__           — your shell's $PATH at install time, so sessions
+                         find the same git / node / python you do
+    __CLAUDE_BIN__     — absolute path to `claude`
+    __RC_WORKDIR__     — folder the sessions start in
+    __RC_NAME__        — optional session title ("" = auto)
+    __RC_EXTRA_ARGS__  — optional extra `claude remote-control` flags
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.local.claude-remote-control</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__BRIDGE_DIR__/remote_control_loop.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__BRIDGE_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+        <key>CLAUDE_EXE</key>
+        <string>__CLAUDE_BIN__</string>
+        <key>RC_WORKDIR</key>
+        <string>__RC_WORKDIR__</string>
+        <key>RC_NAME</key>
+        <string>__RC_NAME__</string>
+        <key>RC_EXTRA_ARGS</key>
+        <string>__RC_EXTRA_ARGS__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- The loop only exits 0 when told to stop; anything else is a crash -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- claude's own output goes to remote-control.log (written by the loop) -->
+    <key>StandardOutPath</key>
+    <string>__BRIDGE_DIR__/remote-control.launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__BRIDGE_DIR__/remote-control.launchd.log</string>
+
+    <!-- Critical: Aqua session only, so login keychain is unlocked -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>

@@ -23,12 +23,13 @@ claude> プロジェクトの README を読んで、次に何をすべきか教�
 2. [機能](#機能)
 3. [動作要件](#動作要件)
 4. [セットアップ](#セットアップ) — Discord bot · インストール · Windows 自動起動 · macOS 自動起動
-5. [設定](#設定) — 環境変数の完全な一覧
-6. [セキュリティモデル](#セキュリティモデル) — **ツールのホワイトリストを広げる前に必読**
-7. [検証チェックリスト](#検証チェックリスト) — 使用前に安全性を確認する方法
-8. [MCP サーバー](#mcp-サーバー)
-9. [トラブルシューティング](#トラブルシューティング) — 開発中に遭遇した 5 つの行き止まり
-10. [ライセンス](#ライセンス)
+5. [Remote Control](#remote-control) — Claude アプリからこのコンピューターを操作
+6. [設定](#設定) — 環境変数の完全な一覧
+7. [セキュリティモデル](#セキュリティモデル) — **ツールのホワイトリストを広げる前に必読**
+8. [検証チェックリスト](#検証チェックリスト) — 使用前に安全性を確認する方法
+9. [MCP サーバー](#mcp-サーバー)
+10. [トラブルシューティング](#トラブルシューティング) — 開発中に遭遇した 5 つの行き止まり
+11. [ライセンス](#ライセンス)
 
 ## アーキテクチャ
 
@@ -66,6 +67,7 @@ claude> プロジェクトの README を読んで、次に何をすべきか教�
 - **トークン会計** — すべての呼び出しで `--output-format json` から `usage` と `total_cost_usd` をキャプチャ。毎日の合計は同梱の MCP ツール経由で確認可能。
 - **MCP サーバー** — 兄弟ファイル `bridge_mcp.py` が 6 つのツール（`inbox_list`、`outbox_list`、`bridge_status`、`send_message`、`tail_log`、`usage_today`）を公開。同じマシン上の別の Claude Code セッションから bridge を検査・制御できます。
 - **自動起動** — Windows ではログオン時の Scheduled Task、macOS では Aqua セッション内の LaunchAgent。
+- **Remote Control の常駐** — 別途インストーラを同梱。ログオン時から `claude remote-control` を動かし続け、スマートフォンの Claude アプリからいつでもこのコンピューターで Claude Code のフルセッションを始められます。[Remote Control](#remote-control) を参照。
 - **設計上シングルユーザー** — 1 つの Discord ユーザー ID と 1 つのチャンネル ID でハードにフィルタリング。それ以外はすべてドロップ。
 
 ## 動作要件
@@ -169,6 +171,77 @@ bash install_aqua_launchagent.sh
 このスクリプトは `$HOME` を読み取り、`which claude` で claude のパスを取得し、`claude-discord-bridge.plist.template` のプレースホルダを置換し、結果を `~/Library/LaunchAgents/dev.local.claude-discord-bridge.plist` に書き込み、`plutil -lint` で検証し、`launchctl bootstrap gui/$(id -u)` で Aqua セッションにブートストラップします。
 
 macOS のインストーラを実行する **前に**、Windows でも動いている場合は Windows 側の Scheduled Task を **Stop + Disable** してください。Discord bot トークンは同時に 1 つの Gateway 接続しか持てず、両方同時に動くと互いに切断し合います。
+
+## Remote Control
+
+Discord bridge は「メッセージを 1 つ送って答えを 1 つもらう」使い方に向いています。スマートフォンの **Claude アプリ** から、このコンピューター上で Claude Code のフルセッションを開きたい場合（ファイル編集やコマンド実行を、1 ステップずつスマートフォンで承認しながら進める）は、Claude Code 組み込みの [Remote Control](https://code.claude.com/docs/en/remote-control) を使います。このリポジトリには、ログオン時から常駐させるインストーラが同梱されています。
+
+| | Discord bridge | Remote Control |
+|---|---|---|
+| 操作する場所 | Discord | Claude アプリの **Code** タブ、または claude.ai/code |
+| ツール | デフォルトは読み取り専用のホワイトリスト | Claude Code のフル機能。許可が必要な操作はスマートフォンで確認される |
+| 会話 | 固定の 1 セッション | セッションをいくつでも開ける |
+
+両方を同時に動かせます。使用量の上限は同じサブスクリプションで共有されます。
+
+**要件:** Pro、Max、Team、Enterprise のいずれかのプランで、claude.ai アカウントでログインしていること（`claude auth login`）。API キーには対応していません。Team / Enterprise では、Owner が先に claude.ai の管理設定で Remote Control を有効にする必要があります。
+
+### ステップ 1: 初回のみの設定（通常のターミナルで手動実行）
+
+初回起動時に 2 つの質問が出ます。バックグラウンドサービスは答えられないので、一度だけ手動で実行してください:
+
+```bash
+# Windows (PowerShell)
+mkdir $HOME\claude-remote; cd $HOME\claude-remote
+claude remote-control
+
+# macOS
+mkdir -p ~/claude-remote && cd ~/claude-remote
+claude remote-control
+```
+
+`Enable Remote Control? (y/n)` と `Trust <フォルダ>?` の両方に `y` と答えます。セッション URL が表示されたら、Claude アプリの **Code** タブにこのコンピューターが出ていることを確認し、`Ctrl+C` で終了します。
+
+`claude-remote` はセッションの開始フォルダです。どのプロジェクトフォルダでも構いませんが、**ホームディレクトリそのものは使えません**。Claude Code はホームディレクトリの信頼設定を保存しないため、バックグラウンドサービスがそこでは起動できません。
+
+### ステップ 2a: Windows 自動起動
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1
+# フォルダ / 名前 / 権限モードを指定する場合:
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1 -WorkDir D:\projects -Name "Home PC" -ExtraArgs "--permission-mode acceptEdits"
+```
+
+`ClaudeRemoteControl` という Scheduled Task が作成されます。ログオン時に非表示ウィンドウで `remote_control_loop.ps1` を実行し、このループが `claude remote-control` を起動して、終了するたびに（たとえばネットワーク切断から約 10 分後）再起動します。出力は `remote-control.log` に書き込まれます。インストーラは 20 秒待ってからログの末尾を表示します。
+
+削除（サーバーも停止します）:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install_remote_control.ps1 -Uninstall
+```
+
+### ステップ 2b: macOS 自動起動（Aqua セッション）
+
+bridge と同じく、**SSH ではなく GUI の Terminal.app ウィンドウから実行してください**:
+
+```bash
+bash install_remote_control_launchagent.sh
+# または: bash install_remote_control_launchagent.sh --workdir ~/projects --name "Mac mini"
+```
+
+`~/Library/LaunchAgents/dev.local.claude-remote-control.plist` がインストールされ、`remote_control_loop.sh` が必要に応じてサーバーを再起動します。セッションには、インストールを実行したターミナルの `$PATH` が引き継がれます。削除は `bash install_remote_control_launchagent.sh --uninstall`。
+
+### 使い方
+
+Claude アプリを開いて **Code** タブをタップします。コンピューターのアイコンに緑の点が付いているのがこのコンピューターです。既存のセッションを開くか新しいセッションを始めて、やりたいことを入力します。
+
+### 注意事項
+
+- コンピューターは起動したまま、スリープさせないでください。ノート PC はスリープ中オフラインになり、復帰すると自動で戻ります。
+- アプリからは bypass permissions を選べません。許可が必要な操作はスマートフォンで承認してください。ファイル編集を自動で許可したい場合は、`-ExtraArgs` / `--extra-args` で `--permission-mode acceptEdits` を渡します。
+- 会話の記録は Anthropic のサーバーを経由しますが、実行はすべてこのコンピューター上で行われます。
+- サービスの稼働中に、同じフォルダで手動の `claude remote-control` を別に起動しないでください。
+- アプリにこのコンピューターが表示されない場合は `remote-control.log` を確認してください。`Workspace not trusted` が出ている、または `Enable Remote Control? (y/n)` で止まっている場合は、そのフォルダでステップ 1 が済んでいません。ログインエラーなら `claude auth login` を実行し、macOS では Aqua セッションからインストールしたかも確認してください。
 
 ## 設定
 
